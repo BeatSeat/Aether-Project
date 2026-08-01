@@ -3,10 +3,10 @@
 将 DART 输出的 SMPL-X 22 关节数据映射到 VRChat Humanoid 骨骼，
 通过 OSC 协议发送到 VRChat。
 
-发送策略（批量模式）：
+发送策略（逐帧模式）：
     1. 预计算整个动作序列所有帧的 OSC 消息（含 frame_index）
-    2. 一次性批量发送当前周期所有消息
-    3. 仅在批量发送后 sleep 一次，等待下一个发送周期
+    2. 可选帧率插值平滑帧间过渡
+    3. 逐帧发送，每帧之间 sleep 帧间隔时间（1/framerate 秒）
 """
 
 import asyncio
@@ -158,7 +158,7 @@ class OSCSender:
 
     使用 python-osc 的 SimpleUDPClient 发送 OSC 消息。
     SimpleUDPClient 本身是同步的，在 async 上下文中通过
-    run_in_executor 进行批量发送以避免阻塞事件循环。
+    run_in_executor 进行逐帧发送以避免阻塞事件循环。
     """
 
     def __init__(self, config: OSCConfig):
@@ -169,6 +169,7 @@ class OSCSender:
         self.config = config
         self.client: Optional[udp_client.SimpleUDPClient] = None
         self._playing = False
+        self._stop_event = asyncio.Event()
         self._current_task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
@@ -258,19 +259,19 @@ class OSCSender:
             self.stop()
 
         self._playing = True
+        self._stop_event.clear()
         self._current_task = asyncio.create_task(
             self._motion_loop(motion_data)
         )
 
     async def _motion_loop(self, motion_data: dict) -> None:
-        """核心播放循环：预计算 → 批量发送 → 单次 sleep"""
+        """核心播放循环：预计算 → 逐帧发送 → 帧间隔 sleep"""
         framerate = motion_data.get("framerate", 30)
         num_frames = motion_data.get("num_frames", len(motion_data.get("poses", [])))
-        cycle_duration = num_frames / framerate  # 一个完整周期的秒数
 
         logger.info(
-            "[OSC] Pre-computing %d frames at %d fps (%.2fs per cycle)",
-            num_frames, framerate, cycle_duration,
+            "[OSC] Pre-computing %d frames at %d fps",
+            num_frames, framerate,
         )
 
         # 1) 预计算所有帧消息
@@ -283,28 +284,58 @@ class OSCSender:
             self._playing = False
             return
 
-        # 2) 展平为单次批量发送列表
-        batch: list[_OSCMessage] = []
-        for frame_msgs in all_frame_msgs:
-            batch.extend(frame_msgs)
+        # 2) 可选：帧率插值平滑过渡（src_fps → target_fps）
+        target_fps = self.config.target_fps if hasattr(self.config, 'target_fps') else framerate
+        if framerate < target_fps:
+            logger.info(
+                "[OSC] Interpolating frames from %d fps to %d fps",
+                framerate, target_fps,
+            )
+            # 对 poses 进行插值，然后重新预计算消息
+            poses = motion_data.get("poses", [])
+            joints = motion_data.get("joints", [])
+            trans = motion_data.get("trans", [])
+            interpolated_poses = self.interpolate_frames(poses, framerate, target_fps)
+            # 同步插值 joints 和 trans（如果有）
+            interpolated_joints = self.interpolate_frames(joints, framerate, target_fps) if joints else []
+            interpolated_trans = self.interpolate_frames(trans, framerate, target_fps) if trans else []
+            interpolated_data = {
+                **motion_data,
+                "poses": interpolated_poses,
+                "joints": interpolated_joints,
+                "trans": interpolated_trans,
+            }
+            all_frame_msgs = self.precompute_messages(
+                interpolated_data, self.config.avatar_prefix
+            )
+            framerate = target_fps
+            num_frames = len(all_frame_msgs)
 
-        total_msgs = len(batch)
+        frame_interval = 1.0 / framerate
+        total_frames = len(all_frame_msgs)
         logger.info(
-            "[OSC] Batch ready: %d messages across %d frames",
-            total_msgs, len(all_frame_msgs),
+            "[OSC] Playing %d frames at %.1f fps (interval=%.3fs)",
+            total_frames, framerate, frame_interval,
         )
 
         try:
-            while self._playing:
-                # 3) 一次性批量发送整个周期
-                await self._send_batch_async(batch)
-                logger.debug(
-                    "[OSC] Batch sent (%d msgs), sleeping %.2fs",
-                    total_msgs, cycle_duration,
-                )
+            for frame_idx, frame_msgs in enumerate(all_frame_msgs):
+                # 检查停止信号
+                if self._stop_event.is_set():
+                    logger.info("[OSC] Stop event received at frame %d/%d", frame_idx, total_frames)
+                    break
 
-                # 4) 单次 sleep，等待下一个发送周期
-                await asyncio.sleep(cycle_duration)
+                # 发送当前帧的全部 OSC 消息
+                await self._send_batch_async(frame_msgs)
+
+                # sleep 帧间隔时间（用 stop_event.wait 实现可中断 sleep）
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=frame_interval)
+                    # 如果 wait_for 正常返回（没有超时），说明 stop_event 被设置了
+                    break
+                except asyncio.TimeoutError:
+                    # 超时是正常的——表示帧间隔已过，继续下一帧
+                    pass
 
         except asyncio.CancelledError:
             logger.info("[OSC] Motion playback cancelled")
@@ -315,6 +346,7 @@ class OSCSender:
     def stop(self) -> None:
         """停止当前动作播放"""
         self._playing = False
+        self._stop_event.set()
         if self._current_task and not self._current_task.done():
             self._current_task.cancel()
         self._current_task = None

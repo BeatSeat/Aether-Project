@@ -66,6 +66,7 @@ class AetherAgent:
         self.tracker = TaskTracker()
 
         self._running = False
+        self._dart_available = False
 
     # ══════════════════════════════════════════════
     # 启动
@@ -77,7 +78,8 @@ class AetherAgent:
 
         # 1. 连接 DART 服务（可选，不可用时跳过动作生成）
         await self.dart.connect()
-        if await self.dart.is_available():
+        self._dart_available = await self.dart.is_available()
+        if self._dart_available:
             health = await self.dart.health_check()
             logger.info("DART service ready: %s", health)
         else:
@@ -111,6 +113,9 @@ class AetherAgent:
         # 7. 启动音频管道（内部会创建 input_loop + output_loop 任务）
         await self.audio.start()
 
+        # 8. 加载垫音文件
+        self.audio.load_filler_sounds()
+
         self._running = True
         logger.info("=== Aether VR Agent Ready ===")
 
@@ -127,6 +132,9 @@ class AetherAgent:
 
         # Motion handler: dispatcher → dart_client → osc_sender
         async def motion_handler(action: str, duration: float = 2.0):
+            if not self._dart_available:
+                logger.warning("Motion skipped: DART service unavailable")
+                return {"num_frames": 0, "error": "DART service unavailable"}
             prompt = DARTClient.format_prompt(action, duration)
             logger.info("Generating motion: %s", prompt)
             try:
@@ -208,6 +216,12 @@ class AetherAgent:
         logger.info("[Agent] User started speaking (interrupt)")
         self.audio.stop_playback()
         self.tts.clear_queue()
+        # 停止动作播放并回到空闲姿态
+        self.osc.stop()
+        try:
+            self.osc.send_idle_pose()
+        except Exception:
+            pass
         # play_filler_sound 是 async，需要在事件循环中调度
         try:
             loop = asyncio.get_running_loop()
