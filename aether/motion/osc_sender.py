@@ -21,7 +21,7 @@ except ImportError:
 
 import numpy as np
 
-from .config import OSCConfig
+from ..config import OSCConfig
 
 logger = logging.getLogger(__name__)
 

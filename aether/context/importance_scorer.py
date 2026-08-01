@@ -7,6 +7,7 @@ from typing import Optional
 
 from google import genai
 
+from ..config import ContextConfig
 from .block_store import ContextBlock, ContextBlockStore
 
 logger = logging.getLogger(__name__)
@@ -15,13 +16,13 @@ logger = logging.getLogger(__name__)
 class ImportanceScorer:
     """双触发重要性评分：每 N 个新块 或 每 T 秒"""
 
-    def __init__(self, config, block_store: ContextBlockStore, api_key: str):
-        self.config = config
+    def __init__(self, context_config: ContextConfig, block_store: ContextBlockStore, api_key: str):
+        self.config = context_config
         self.store = block_store
         self.client = genai.Client(api_key=api_key)
-        self.model = config.context.scorer_model          # gemini-2.0-flash
-        self.batch_size = config.context.scoring_batch_size  # 10
-        self.interval = config.context.scoring_interval    # 30 秒
+        self.model = context_config.scorer_model          # gemini-2.0-flash
+        self.batch_size = context_config.scoring_batch_size  # 10
+        self.interval = context_config.scoring_interval    # 30 秒
 
         self._unscored_blocks: list[ContextBlock] = []
         self._last_score_time = time.time()

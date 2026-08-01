@@ -6,6 +6,7 @@ from typing import Optional
 
 from google import genai
 
+from ..config import ContextConfig
 from .block_store import ContextBlock, ContextBlockStore
 
 logger = logging.getLogger(__name__)
@@ -20,12 +21,12 @@ class ContextEvictor:
     L4: 内置 context_window_compression 兜底（ER2 侧配置）
     """
 
-    def __init__(self, config, block_store: ContextBlockStore, api_key: str):
-        self.config = config
+    def __init__(self, context_config: ContextConfig, block_store: ContextBlockStore, api_key: str):
+        self.config = context_config
         self.store = block_store
         self.client = genai.Client(api_key=api_key)
-        self.model = config.context.scorer_model
-        self.max_tokens = config.context.max_active_tokens   # 102400
+        self.model = context_config.scorer_model
+        self.max_tokens = context_config.max_active_tokens   # 102400
         self._usage_metadata_tokens: Optional[int] = None
 
     def should_evict(self) -> bool:

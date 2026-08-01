@@ -1,1 +1,5 @@
-"""语音处理子包 — TTS 合成与音频流管理"""
+"""TTS 语音合成服务"""
+from .tts_engine import TTSEngine
+from .base import BaseTTSEngine
+
+__all__ = ["TTSEngine", "BaseTTSEngine"]

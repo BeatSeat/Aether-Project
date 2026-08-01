@@ -24,7 +24,7 @@ from typing import Optional, Callable, Awaitable
 
 import numpy as np
 
-from .config import AudioConfig
+from ..config import AudioConfig
 
 logger = logging.getLogger(__name__)
 

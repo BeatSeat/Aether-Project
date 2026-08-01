@@ -5,7 +5,6 @@ from .importance_scorer import ImportanceScorer
 from .evictor import ContextEvictor
 from .rag_retriever import RAGRetriever
 from .heartbeat import HeartbeatGenerator, TaskState
-from .task_tracker import TaskTracker
 
 __all__ = [
     "ContextBlock",
@@ -15,5 +14,4 @@ __all__ = [
     "RAGRetriever",
     "HeartbeatGenerator",
     "TaskState",
-    "TaskTracker",
 ]

@@ -16,12 +16,11 @@ import sys
 
 from .config import load_config, AetherConfig
 from .logging_config import setup_logging
-from .er2_client import ER2Client
+from .er2 import ER2Client
 from .tool_dispatcher import ToolDispatcher
-from .dart_client import DARTClient
-from .osc_sender import OSCSender
-from .audio_pipeline import AudioPipeline
-from .tts_engine import TTSEngine
+from .motion import DARTClient, OSCSender
+from .io import AudioPipeline
+from .speech import TTSEngine
 from .context import (
     ContextBlock,
     ContextBlockStore,
@@ -29,7 +28,6 @@ from .context import (
     ContextEvictor,
     RAGRetriever,
     HeartbeatGenerator,
-    TaskTracker,
 )
 
 logger = logging.getLogger(__name__)
@@ -50,7 +48,7 @@ class AetherAgent:
         self.config = config
 
         # ── 核心模块 ──────────────────────────────
-        self.er2 = ER2Client(config)
+        self.er2 = ER2Client(config.er2)
         self.dispatcher = ToolDispatcher()
         self.dart = DARTClient(config.dart)
         self.osc = OSCSender(config.osc)
@@ -59,11 +57,10 @@ class AetherAgent:
 
         # ── 上下文管理 ────────────────────────────
         self.block_store = ContextBlockStore(config.context.embedding_dim)
-        self.scorer = ImportanceScorer(config, self.block_store, config.er2.api_key)
-        self.evictor = ContextEvictor(config, self.block_store, config.er2.api_key)
-        self.rag = RAGRetriever(config, self.block_store, config.er2.api_key)
+        self.scorer = ImportanceScorer(config.context, self.block_store, config.er2.api_key)
+        self.evictor = ContextEvictor(config.context, self.block_store, config.er2.api_key)
+        self.rag = RAGRetriever(config.context, self.block_store, config.er2.api_key)
         self.heartbeat = HeartbeatGenerator(config.context.heartbeat_interval)
-        self.tracker = TaskTracker()
 
         self._running = False
         self._dart_available = False

@@ -21,7 +21,7 @@ try:
 except ImportError:
     httpx = None  # type: ignore[assignment]
 
-from .config import DARTConfig
+from ..config import DARTConfig
 
 logger = logging.getLogger(__name__)
 

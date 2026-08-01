@@ -5,6 +5,7 @@ import logging
 import numpy as np
 from google import genai
 
+from ..config import ContextConfig
 from .block_store import ContextBlock, ContextBlockStore
 
 logger = logging.getLogger(__name__)
@@ -17,12 +18,12 @@ class RAGRetriever:
     FAISS top-K 搜索，贪心选择直到接近 max_tokens。
     """
 
-    def __init__(self, config, block_store: ContextBlockStore, api_key: str):
-        self.config = config
+    def __init__(self, context_config: ContextConfig, block_store: ContextBlockStore, api_key: str):
+        self.config = context_config
         self.store = block_store
         self.client = genai.Client(api_key=api_key)
-        self.embedding_model = config.context.embedding_model   # gemini-embedding-001
-        self.embedding_dim = config.context.embedding_dim       # 768
+        self.embedding_model = context_config.embedding_model   # gemini-embedding-001
+        self.embedding_dim = context_config.embedding_dim       # 768
 
     async def embed_text(self, text: str) -> np.ndarray:
         """使用 embedding 模型嵌入文本"""
