@@ -21,6 +21,11 @@ from .base import BaseTTSEngine
 
 logger = logging.getLogger(__name__)
 
+
+class _StaleGeneration(Exception):
+    """当 synthesize 代际已过期（被用户打断）时抛出，用于丢弃飞行中的 API 结果"""
+
+
 # 情感 → TTS 标签映射（20+ 种）
 EMOTION_TO_TAGS = {
     "neutral": "[neutral]",
@@ -79,6 +84,9 @@ class TTSEngine(BaseTTSEngine):
         self.audio_queue: asyncio.Queue = asyncio.Queue()
         self._playing = False
 
+        # 代际 ID，用于打断时使飞行中的 API 调用失效
+        self._generation_id: int = 0
+
     # ── 主入口 ────────────────────────────────────
 
     async def synthesize(self, text: str, emotion: str = "neutral",
@@ -99,8 +107,8 @@ class TTSEngine(BaseTTSEngine):
         """
         logger.info(f"[TTS] synthesize: text='{text}', emotion={emotion}, rate={speech_rate}")
 
-        # 1. 文本切片（默认英文标点，TTS 输出是英文语音）
-        segments = self._split_text(text, split_on="english")
+        # 1. 文本切片（默认中文标点，系统提示词要求模型输出中文）
+        segments = self._split_text(text, split_on="chinese")
         logger.info(f"[TTS] Split into {len(segments)} segments")
 
         # 2. 为每段构建带标签的 TTS 文本
@@ -109,19 +117,26 @@ class TTSEngine(BaseTTSEngine):
             tagged = self._build_tagged_text(segment, emotion, speech_rate, is_first=(i == 0))
             tagged_segments.append(tagged)
 
+        # 递增代际 ID 并捕获，用于打断时丢弃旧结果
+        self._generation_id += 1
+        current_gen = self._generation_id
+
         # 3. 并发调用 TTS（但按序入队）
         tasks = []
         for tagged in tagged_segments:
-            task = asyncio.create_task(self._call_tts_api(tagged))
+            task = asyncio.create_task(self._call_tts_api(tagged, current_gen))
             tasks.append(task)
 
         # 按顺序等待并加入播放队列
         for i, task in enumerate(tasks):
             try:
                 pcm_data = await task
-                if pcm_data:
+                if pcm_data is not None:
                     await self.audio_queue.put(pcm_data)
                     logger.debug(f"[TTS] Segment {i+1}/{len(tasks)} queued")
+            except _StaleGeneration:
+                logger.debug(f"[TTS] Segment {i+1}/{len(tasks)} discarded (stale generation)")
+                break
             except Exception as e:
                 logger.error(f"[TTS] Segment {i+1} failed: {e}")
 
@@ -247,12 +262,20 @@ class TTSEngine(BaseTTSEngine):
 
     # ── API 调用 ──────────────────────────────────
 
-    async def _call_tts_api(self, tagged_text: str) -> Optional[bytes]:
+    async def _call_tts_api(self, tagged_text: str,
+                            generation_id: int = 0) -> Optional[bytes]:
         """
         调用 Gemini TTS API。
 
+        Args:
+            tagged_text: 带情感标签的文本
+            generation_id: 本次合成代际 ID，用于打断检测
+
         Returns:
             PCM 音频数据 (24kHz, 16-bit, mono) 或 None
+
+        Raises:
+            _StaleGeneration: 当 generation_id 已过期（被打断）
         """
         try:
             response = await self.client.aio.models.generate_content(
@@ -270,10 +293,18 @@ class TTSEngine(BaseTTSEngine):
                 )
             )
 
+            # 打断检测：如果代际 ID 已变化，丢弃结果
+            if generation_id != self._generation_id:
+                raise _StaleGeneration(
+                    f"gen {generation_id} != current {self._generation_id}"
+                )
+
             # 提取 PCM 音频数据
             audio_data = response.candidates[0].content.parts[0].inline_data.data
             return audio_data
 
+        except _StaleGeneration:
+            raise
         except Exception as e:
             logger.error(f"[TTS] API call failed for '{tagged_text[:30]}...': {e}")
             return None
@@ -281,13 +312,14 @@ class TTSEngine(BaseTTSEngine):
     # ── 队列管理 ──────────────────────────────────
 
     def clear_queue(self):
-        """清空播放队列（用于打断场景）"""
+        """清空播放队列（用于打断场景），同时递增代际 ID 使飞行中的 API 调用失效"""
+        self._generation_id += 1
         while not self.audio_queue.empty():
             try:
                 self.audio_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-        logger.info("[TTS] Queue cleared")
+        logger.info(f"[TTS] Queue cleared (generation -> {self._generation_id})")
 
     async def get_next_audio(self) -> Optional[bytes]:
         """从播放队列获取下一段音频（供 audio_pipeline 使用）"""

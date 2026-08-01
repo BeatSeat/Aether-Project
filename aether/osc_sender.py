@@ -168,8 +168,8 @@ class OSCSender:
             )
         self.config = config
         self.client: Optional[udp_client.SimpleUDPClient] = None
-        self._playing = False
         self._stop_event = asyncio.Event()
+        self._stop_event.set()  # 初始状态为「未播放」
         self._current_task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
@@ -248,6 +248,11 @@ class OSCSender:
     # 播放控制
     # ------------------------------------------------------------------
 
+    @property
+    def _playing(self) -> bool:
+        """基于 _stop_event 反值，避免竞态"""
+        return not self._stop_event.is_set()
+
     async def play_motion(self, motion_data: dict) -> None:
         """异步播放动作序列（非阻塞，后台 Task）
 
@@ -256,9 +261,15 @@ class OSCSender:
         """
         if self._playing:
             logger.warning("[OSC] Already playing, cancelling current motion")
+            old_task = self._current_task
             self.stop()
+            # 等待旧 task 完全结束，避免 finally 块与新 task 交错
+            if old_task is not None:
+                try:
+                    await old_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
-        self._playing = True
         self._stop_event.clear()
         self._current_task = asyncio.create_task(
             self._motion_loop(motion_data)
@@ -281,7 +292,7 @@ class OSCSender:
 
         if not all_frame_msgs:
             logger.warning("[OSC] No frames to play")
-            self._playing = False
+            self._stop_event.set()
             return
 
         # 2) 可选：帧率插值平滑过渡（src_fps → target_fps）
@@ -340,12 +351,11 @@ class OSCSender:
         except asyncio.CancelledError:
             logger.info("[OSC] Motion playback cancelled")
         finally:
-            self._playing = False
+            self._stop_event.set()
             logger.info("[OSC] Motion playback complete")
 
     def stop(self) -> None:
         """停止当前动作播放"""
-        self._playing = False
         self._stop_event.set()
         if self._current_task and not self._current_task.done():
             self._current_task.cancel()

@@ -7,6 +7,7 @@
 """
 
 import asyncio
+import contextlib
 import logging
 import time
 from typing import Callable, Awaitable
@@ -70,6 +71,7 @@ TOOL_DECLARATIONS = [
                     "text为要说的话（中文，1-2句，不超过50字），"
                     "emotion为当前情绪状态，speech_rate为语速。"
                 ),
+                behavior=types.Behavior.NON_BLOCKING,
                 parameters=types.Schema(
                     type=types.Type.OBJECT,
                     properties={
@@ -107,6 +109,7 @@ TOOL_DECLARATIONS = [
                     "（如'walk forward','wave hand','nod head','dance'），"
                     "duration为动作持续时间（秒）。"
                 ),
+                behavior=types.Behavior.NON_BLOCKING,
                 parameters=types.Schema(
                     type=types.Type.OBJECT,
                     properties={
@@ -186,9 +189,11 @@ class ER2Client:
         self.config = config
         self.client = genai.Client(api_key=config.er2.api_key)
         self.session = None
+        self._exit_stack: contextlib.AsyncExitStack | None = None
         self._running = False
         self._resumption_token: str | None = None
         self._tool_call_handler: Callable[..., Awaitable[list]] | None = None
+        self._tool_call_cancelled_handler: Callable[[list[str]], Awaitable] | None = None
         self._block_interceptor: Callable[..., Awaitable] | None = None
         self._connect_time: float = 0.0
 
@@ -198,29 +203,63 @@ class ER2Client:
         """设置函数调用处理器（由 ToolDispatcher 注入）"""
         self._tool_call_handler = handler
 
+    def set_tool_call_cancelled_handler(self, handler: Callable[[list[str]], Awaitable]):
+        """设置工具调用取消处理器（由 ToolDispatcher 注入）
+
+        当收到 tool_call_cancellation 消息时调用，
+        handler 接收被取消的 function call ID 列表。
+        """
+        self._tool_call_cancelled_handler = handler
+
     def set_block_interceptor(self, interceptor: Callable[..., Awaitable]):
         """设置输出块拦截器（由 Sub-agent Runtime 注入）"""
         self._block_interceptor = interceptor
 
     # ── 连接管理 ──────────────────────────────
 
-    async def connect(self):
-        """建立 Live API 连接
+    def _build_live_config(self) -> dict:
+        """构建 LiveConnectConfig 字典
 
-        使用 client.aio.live.connect() 创建 WebSocket 会话，
-        配置 response_modalities、system_instruction 和工具声明。
+        包含 session_resumption、context_window_compression、
+        input_audio_transcription 等高级配置。
         """
-        logger.info("[ER2] Connecting to %s ...", self.config.er2.model)
-
-        live_config = {
+        config: dict = {
             "response_modalities": self.config.er2.response_modalities,
             "system_instruction": SYSTEM_INSTRUCTION,
             "tools": TOOL_DECLARATIONS,
+            # 会话恢复：启用后服务器会发送 session_resumption_update
+            "session_resumption": types.SessionResumptionConfig(
+                handle=self._resumption_token,  # None 表示新建会话
+                transparent=True,
+            ),
+            # 上下文窗口压缩：防止长对话超出 token 限制
+            "context_window_compression": types.ContextWindowCompressionConfig(
+                trigger_tokens=8000,
+                sliding_window=types.SlidingWindow(target_tokens=4000),
+            ),
+            # 输入音频转写：自动检测语言
+            "input_audio_transcription": types.AudioTranscriptionConfig(),
         }
+        return config
 
-        self.session = await self.client.aio.live.connect(
-            model=self.config.er2.model,
-            config=live_config,
+    async def connect(self):
+        """建立 Live API 连接
+
+        使用 AsyncExitStack 管理 client.aio.live.connect() 的
+        asynccontextmanager 生命周期，使 session 在 close() 前保持打开。
+        """
+        logger.info("[ER2] Connecting to %s ...", self.config.er2.model)
+
+        live_config = self._build_live_config()
+
+        # 使用 AsyncExitStack 进入 asynccontextmanager，
+        # 将 session 作为长期资源管理，在 close() 时才退出。
+        self._exit_stack = contextlib.AsyncExitStack()
+        self.session = await self._exit_stack.enter_async_context(
+            self.client.aio.live.connect(
+                model=self.config.er2.model,
+                config=live_config,
+            )
         )
         self._running = True
         self._connect_time = time.time()
@@ -230,39 +269,45 @@ class ER2Client:
         """关闭连接并清理资源"""
         logger.info("[ER2] Closing session ...")
         self._running = False
-        if self.session:
+        if self._exit_stack:
             try:
-                await self.session.close()
+                await self._exit_stack.aclose()
             except Exception as exc:
                 logger.warning("[ER2] Error closing session: %s", exc)
             finally:
+                self._exit_stack = None
                 self.session = None
         logger.info("[ER2] Session closed")
 
     async def reconnect(self):
         """会话恢复 / 重连
 
-        如果有 resumption_token 则注入恢复上下文，否则重新建立连接。
+        如果有 resumption_token 则在 connect config 中注入 handle，
+        SDK 会自动恢复会话上下文；否则建立全新连接。
         """
         logger.warning("[ER2] Attempting reconnection ...")
         self._running = False
 
-        if self.session:
+        # 通过 AsyncExitStack 正确退出旧的 asynccontextmanager
+        if self._exit_stack:
             try:
-                await self.session.close()
+                await self._exit_stack.aclose()
             except Exception:
                 pass
-            self.session = None
+            finally:
+                self._exit_stack = None
+                self.session = None
 
         # 退避等待
         await asyncio.sleep(2)
 
-        # 重新建立连接
+        # 重新建立连接（如果有 _resumption_token，connect config 会自动注入）
         await self.connect()
 
-        # 如果有 resumption_token，注入恢复上下文
         if self._resumption_token:
-            await self.send_text("[系统] 会话已恢复，请继续之前的对话。")
+            logger.info("[ER2] Session resumed with token")
+        else:
+            logger.info("[ER2] New session established (no resumption token)")
 
         self._running = True
         logger.info("[ER2] Reconnected successfully")
@@ -369,32 +414,73 @@ class ER2Client:
                                     "[ER2] Block interceptor error: %s", exc
                                 )
 
-                        # 工具调用分发
-                        if chunk.server_content.tool_call:
-                            if self._tool_call_handler:
-                                try:
-                                    responses = await self._tool_call_handler(
-                                        chunk.server_content.tool_call
-                                    )
-                                    if responses:
-                                        await self.send_tool_response(responses)
-                                except Exception as exc:
-                                    logger.error(
-                                        "[ER2] Tool call handler error: %s", exc
-                                    )
-                            else:
-                                logger.warning(
-                                    "[ER2] Received tool_call but no handler set"
+                    # 3. 工具调用分发（tool_call 在 LiveServerMessage 顶层）
+                    if chunk.tool_call:
+                        if self._tool_call_handler:
+                            try:
+                                responses = await self._tool_call_handler(
+                                    chunk.tool_call
                                 )
+                                if responses:
+                                    await self.send_tool_response(responses)
+                            except Exception as exc:
+                                logger.error(
+                                    "[ER2] Tool call handler error: %s", exc
+                                )
+                        else:
+                            logger.warning(
+                                "[ER2] Received tool_call but no handler set"
+                            )
 
-                    # 3. Token 用量
+                    # 3b. 工具调用取消（ToolCallCancellation）
+                    if chunk.tool_call_cancellation:
+                        cancelled_ids = chunk.tool_call_cancellation.ids or []
+                        logger.info(
+                            "[ER2] Tool call cancellation: ids=%s",
+                            cancelled_ids,
+                        )
+                        if self._tool_call_cancelled_handler:
+                            try:
+                                await self._tool_call_cancelled_handler(
+                                    cancelled_ids
+                                )
+                            except Exception as exc:
+                                logger.error(
+                                    "[ER2] Cancellation handler error: %s",
+                                    exc,
+                                )
+                        else:
+                            logger.warning(
+                                "[ER2] Received tool_call_cancellation "
+                                "but no handler set"
+                            )
+
+                    # 4. 会话恢复 token 更新
+                    if chunk.session_resumption_update:
+                        update = chunk.session_resumption_update
+                        if update.new_handle and update.resumable:
+                            self._resumption_token = update.new_handle
+                            logger.debug(
+                                "[ER2] Resumption token updated"
+                            )
+
+                    # 5. 服务器即将断开（go_away）→ 主动重连
+                    if chunk.go_away:
+                        logger.warning(
+                            "[ER2] Server go_away: time_left=%s, reconnecting...",
+                            chunk.go_away.time_left,
+                        )
+                        # 跳出当前 receive() 迭代，外层循环会触发 reconnect
+                        break
+
+                    # 6. Token 用量
                     if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
                         logger.debug(
                             "[ER2] Token usage: %s", chunk.usage_metadata
                         )
 
-                # 正常退出（session 关闭），跳出循环
-                break
+                # receive() 一个 turn 结束后继续下一轮（不 break）
+                continue
 
             except Exception as e:
                 logger.error("[ER2] Receive loop error: %s", e)

@@ -47,6 +47,8 @@ class DispatcherState:
     current_tts_task: Optional[asyncio.Task] = None
     recent_actions: list = field(default_factory=lambda: [])  # 最近的动作记录
     emotion_state: str = "neutral"  # 当前情绪状态
+    # 所有活跃的后台工具调用任务，key = function_call.id
+    active_tasks: dict = field(default_factory=dict)
 
 
 class ToolDispatcher:
@@ -64,6 +66,8 @@ class ToolDispatcher:
         self._motion_handler: Optional[Callable] = None    # async (action, duration) -> dict
         self._memory_handler: Optional[Callable] = None    # async (query, max_tokens) -> str
         self._status_handler: Optional[Callable] = None    # async (status_type, detail) -> None
+        # 后台任务完成后的结果回调：async (list[FunctionResponse]) -> None
+        self._response_callback: Optional[Callable] = None
 
     # ── 处理器注入 ─────────────────────────────
 
@@ -83,42 +87,79 @@ class ToolDispatcher:
         """注入状态处理器: async (status_type, detail) -> None"""
         self._status_handler = handler
 
+    def set_response_callback(self, callback: Callable[[list], Awaitable]):
+        """注入结果回调: async (list[FunctionResponse]) -> None
+
+        后台任务完成后通过此回调将结果异步回传给 ER2，
+        使 receive_loop 不被阻塞。
+        """
+        self._response_callback = callback
+
     # ── 主入口 ─────────────────────────────────
 
     async def handle_tool_call(self, tool_call) -> list:
-        """处理 ER2 的 tool_call 事件。
+        """处理 ER2 的 tool_call 事件（非阻塞）。
 
-        签名匹配 ER2Client.receive_loop() 中的调用：
-            responses = await self._tool_call_handler(chunk.server_content.tool_call)
-
-        接收 tool_call 对象，返回 list[types.FunctionResponse]。
+        每个 function call 启动后台任务，立即返回空列表，
+        不阻塞 receive_loop。后台任务完成后通过
+        _response_callback 异步回传 FunctionResponse。
         """
-        responses = []
-
         for fc in tool_call.function_calls:
-            try:
-                result = await self._dispatch_single(fc)
-                responses.append(types.FunctionResponse(
-                    id=fc.id,
-                    name=fc.name,
-                    response=result,
-                ))
-            except asyncio.CancelledError:
-                logger.warning("[Dispatcher] Tool call %s cancelled", fc.name)
-                responses.append(types.FunctionResponse(
-                    id=fc.id,
-                    name=fc.name,
-                    response={"status": "cancelled", "reason": "interrupted by user"},
-                ))
-            except Exception as e:
-                logger.error("[Dispatcher] Tool call %s failed: %s", fc.name, e)
-                responses.append(types.FunctionResponse(
-                    id=fc.id,
-                    name=fc.name,
-                    response={"status": "error", "error": str(e)},
-                ))
+            task = asyncio.create_task(
+                self._run_and_respond(fc),
+                name=f"tool:{fc.name}:{fc.id}",
+            )
+            self.state.active_tasks[fc.id] = task
+            logger.info(
+                "[Dispatcher] Submitted %s (id=%s) as background task",
+                fc.name, fc.id,
+            )
 
-        return responses
+        # 返回空列表 — receive_loop 不再同步等待结果
+        return []
+
+    async def _run_and_respond(self, fc):
+        """后台执行单个 function call 并通过回调回传结果"""
+        fc_id = fc.id
+        try:
+            result = await self._dispatch_single(fc)
+            response = types.FunctionResponse(
+                id=fc_id,
+                name=fc.name,
+                response=result,
+            )
+        except asyncio.CancelledError:
+            logger.warning("[Dispatcher] Tool call %s cancelled", fc.name)
+            response = types.FunctionResponse(
+                id=fc_id,
+                name=fc.name,
+                response={"status": "cancelled", "reason": "interrupted by user"},
+            )
+        except Exception as e:
+            logger.error("[Dispatcher] Tool call %s failed: %s", fc.name, e)
+            response = types.FunctionResponse(
+                id=fc_id,
+                name=fc.name,
+                response={"status": "error", "error": str(e)},
+            )
+        finally:
+            # 从活跃任务中移除
+            self.state.active_tasks.pop(fc_id, None)
+
+        # 通过回调异步回传结果
+        if self._response_callback:
+            try:
+                await self._response_callback([response])
+            except Exception as exc:
+                logger.error(
+                    "[Dispatcher] Response callback failed for %s: %s",
+                    fc.name, exc,
+                )
+        else:
+            logger.warning(
+                "[Dispatcher] No response callback set, result for %s dropped",
+                fc.name,
+            )
 
     # ── 路由分发 ───────────────────────────────
 
@@ -262,15 +303,37 @@ class ToolDispatcher:
     # ── 打断取消 ───────────────────────────────
 
     async def cancel_pending(self, cancelled_ids: list):
-        """处理 ToolCallCancellation — 取消待执行的调用"""
+        """处理 ToolCallCancellation — 取消待执行的调用
+
+        通过 active_tasks 字典精确匹配被取消的 function call ID，
+        对正在运行的后台任务调用 task.cancel()。
+        """
         logger.info("[Dispatcher] Cancelling tool calls: %s", cancelled_ids)
 
+        cancelled_count = 0
+        for fc_id in cancelled_ids:
+            task = self.state.active_tasks.get(fc_id)
+            if task and not task.done():
+                task.cancel()
+                cancelled_count += 1
+                logger.info("[Dispatcher] Cancelled task: %s", fc_id)
+
+        # 兼容旧逻辑：如果没有指定 ID 或没找到匹配任务，取消所有活跃任务
+        if cancelled_count == 0 and not cancelled_ids:
+            for fc_id, task in list(self.state.active_tasks.items()):
+                if not task.done():
+                    task.cancel()
+                    cancelled_count += 1
+
+        # 同步更新状态
         if self.state.current_motion_task and not self.state.current_motion_task.done():
             self.state.current_motion_task.cancel()
             self.state.motion_state = MotionState.CANCELLED
 
         if self.state.current_tts_task and not self.state.current_tts_task.done():
             self.state.current_tts_task.cancel()
+
+        logger.info("[Dispatcher] Cancelled %d tasks", cancelled_count)
 
     # ── 状态摘要 ───────────────────────────────
 

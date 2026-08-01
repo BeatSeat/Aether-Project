@@ -94,9 +94,13 @@ class AetherAgent:
 
         # 4. 注入处理器到 ER2
         self.er2.set_tool_call_handler(self.dispatcher.handle_tool_call)
+        self.er2.set_tool_call_cancelled_handler(self.dispatcher.cancel_pending)
         self.er2.set_block_interceptor(self._block_interceptor)
 
-        # 5. 设置音频回调
+        # 5. 注入结果回调：后台任务完成后异步回传 FunctionResponse
+        self.dispatcher.set_response_callback(self.er2.send_tool_response)
+
+        # 6. 设置音频回调
         #    注意：on_speech_start / on_speech_end 是同步回调
         #         （AudioPipeline._process_vad_result 中直接调用，不 await）
         #    on_audio_chunk 是异步回调（input_loop 中 await）
@@ -106,14 +110,14 @@ class AetherAgent:
             on_audio_chunk=self._on_audio_chunk,
         )
 
-        # 6. 连接 ER2 Live API
+        # 7. 连接 ER2 Live API
         await self.er2.connect()
         logger.info("ER2 Live API connected")
 
-        # 7. 启动音频管道（内部会创建 input_loop + output_loop 任务）
+        # 8. 启动音频管道（内部会创建 input_loop + output_loop 任务）
         await self.audio.start()
 
-        # 8. 加载垫音文件
+        # 9. 加载垫音文件
         self.audio.load_filler_sounds()
 
         self._running = True
@@ -190,9 +194,9 @@ class AetherAgent:
             self.scorer.queue_for_scoring(block)
             self.heartbeat.update_from_text(text)
 
-        # 提取工具调用（如果有的话，也记录到上下文）
-        if hasattr(sc, "tool_call") and sc.tool_call:
-            for fc in sc.tool_call.function_calls:
+        # 提取工具调用（tool_call 在 LiveServerMessage 顶层，不在 server_content 里）
+        if hasattr(chunk, "tool_call") and chunk.tool_call:
+            for fc in chunk.tool_call.function_calls:
                 fc_text = f"{fc.name}({fc.args})"
                 block = ContextBlock(
                     block_type="tool_call",
@@ -396,7 +400,7 @@ class AetherAgent:
         """打印系统状态"""
         print(f"\n--- System Status ---")
         print(f"ER2:     {'Connected' if self.er2.session else 'Disconnected'}")
-        print(f"DART:    {'Available' if self.dart._client else 'Not connected'}")
+        print(f"DART:    {'Available' if self._dart_available else 'Not connected'}")
         print(f"OSC:     {self.config.osc.host}:{self.config.osc.port}")
         print(f"Motion:  {self.dispatcher.state.motion_state.value}")
         print(f"Emotion: {self.dispatcher.state.emotion_state}")
