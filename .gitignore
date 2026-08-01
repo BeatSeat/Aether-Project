@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Logs (不提交日志内容)
+logs/*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local config overrides
+.env
+config.local.yaml
+
+# Legacy files
+_legacy/
+
+# Temporary files
+*.tmp
+*.bak
