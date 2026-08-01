@@ -14,7 +14,7 @@ tensorboardX
 wandb
 
 # --- NLP / text encoding ---
-spacy==2.3.4
+spacy>=3.0
 ftfy
 regex
 transformers
@@ -41,7 +41,11 @@ matplotlib
 imageio
 trimesh
 
+# --- LoRA ---
+loralib
+
 # --- Misc ---
 tqdm
 colorama
 psutil
+gdown
