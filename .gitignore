@@ -33,3 +33,22 @@ _legacy/
 # Temporary files
 *.tmp
 *.bak
+
+# DART model files & large data (download separately)
+dart/mld_denoiser/*/checkpoint_*.pt
+dart/mvae/*/checkpoint_*.pt
+dart/data/smplx_lockedhead_20230207/models_lockedhead/smplx/*.npz
+dart/data/smplx_lockedhead_20230207/*.zip
+dart/data/SMPLX_FEMALE.pkl
+dart/data/**/*.pkl
+dart/data/**/*.npz
+dart/__pycache__/
+dart/**/__pycache__/
+dart/DART/data/
+dart/data/scenes/
+dart/data/traj_test/
+dart/data/test_locomotion/
+dart/data/optim_interaction/
+dart/data/inbetween/
+dart/data/test_smplx.zip
+dart/data/smplx_lockedhead_20230207.zip

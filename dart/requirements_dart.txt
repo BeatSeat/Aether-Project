@@ -1,0 +1,47 @@
+# DART (DartControl) dependencies — GPU-agnostic
+# NOTE: PyTorch is NOT included here. Install it separately for your GPU:
+#   NVIDIA (CUDA):  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#   AMD (ROCm):     pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2.4
+
+# --- Core ---
+numpy
+scipy
+scikit-learn
+
+# --- Deep learning utilities ---
+tensorboard
+tensorboardX
+wandb
+
+# --- NLP / text encoding ---
+spacy==2.3.4
+ftfy
+regex
+transformers
+sentence-transformers
+clip @ git+https://github.com/openai/CLIP.git
+
+# --- SMPL-X body model ---
+smplx
+chumpy
+
+# --- FastAPI server ---
+fastapi
+uvicorn[standard]
+pydantic>=2.0
+
+# --- Config / CLI ---
+omegaconf
+hydra-core
+tyro
+
+# --- Data / visualization ---
+h5py
+matplotlib
+imageio
+trimesh
+
+# --- Misc ---
+tqdm
+colorama
+psutil
