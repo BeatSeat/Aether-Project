@@ -9,7 +9,7 @@
 import asyncio
 import logging
 import time
-from typing import Any, Callable, Awaitable
+from typing import Callable, Awaitable
 
 from google import genai
 from google.genai import types
@@ -340,59 +340,65 @@ class ER2Client:
         3. usage_metadata — token 用量日志
         4. 异常 — 触发自动重连
         """
-        if not self.session:
-            logger.error("[ER2] receive_loop called without active session")
-            return
+        while self._running:
+            if not self.session:
+                logger.error("[ER2] receive_loop called without active session")
+                return
 
-        try:
-            async for chunk in self.session.receive():
-                # 1. 文本输出
-                if chunk.text:
-                    logger.info("[ER2] %s", chunk.text)
+            try:
+                async for chunk in self.session.receive():
+                    # 1. 文本输出
+                    if chunk.text:
+                        logger.info("[ER2] %s", chunk.text)
 
-                # 2. 服务器内容块
-                if chunk.server_content:
-                    # 被打断标记
-                    if (
-                        hasattr(chunk.server_content, "interrupted")
-                        and chunk.server_content.interrupted
-                    ):
-                        logger.info("[ER2] Generation interrupted by user")
+                    # 2. 服务器内容块
+                    if chunk.server_content:
+                        # 被打断标记
+                        if (
+                            hasattr(chunk.server_content, "interrupted")
+                            and chunk.server_content.interrupted
+                        ):
+                            logger.info("[ER2] Generation interrupted by user")
 
-                    # 交给 block_interceptor 记录上下文块
-                    if self._block_interceptor:
-                        try:
-                            await self._block_interceptor(chunk)
-                        except Exception as exc:
-                            logger.warning(
-                                "[ER2] Block interceptor error: %s", exc
-                            )
-
-                    # 工具调用分发
-                    if chunk.server_content.tool_call:
-                        if self._tool_call_handler:
+                        # 交给 block_interceptor 记录上下文块
+                        if self._block_interceptor:
                             try:
-                                responses = await self._tool_call_handler(
-                                    chunk.server_content.tool_call
-                                )
-                                if responses:
-                                    await self.send_tool_response(responses)
+                                await self._block_interceptor(chunk)
                             except Exception as exc:
-                                logger.error(
-                                    "[ER2] Tool call handler error: %s", exc
+                                logger.warning(
+                                    "[ER2] Block interceptor error: %s", exc
                                 )
-                        else:
-                            logger.warning(
-                                "[ER2] Received tool_call but no handler set"
-                            )
 
-                # 3. Token 用量
-                if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
-                    logger.debug(
-                        "[ER2] Token usage: %s", chunk.usage_metadata
-                    )
+                        # 工具调用分发
+                        if chunk.server_content.tool_call:
+                            if self._tool_call_handler:
+                                try:
+                                    responses = await self._tool_call_handler(
+                                        chunk.server_content.tool_call
+                                    )
+                                    if responses:
+                                        await self.send_tool_response(responses)
+                                except Exception as exc:
+                                    logger.error(
+                                        "[ER2] Tool call handler error: %s", exc
+                                    )
+                            else:
+                                logger.warning(
+                                    "[ER2] Received tool_call but no handler set"
+                                )
 
-        except Exception as e:
-            logger.error("[ER2] Receive loop error: %s", e)
-            if self._running:
-                await self.reconnect()
+                    # 3. Token 用量
+                    if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
+                        logger.debug(
+                            "[ER2] Token usage: %s", chunk.usage_metadata
+                        )
+
+                # 正常退出（session 关闭），跳出循环
+                break
+
+            except Exception as e:
+                logger.error("[ER2] Receive loop error: %s", e)
+                if self._running:
+                    await self.reconnect()
+                else:
+                    break

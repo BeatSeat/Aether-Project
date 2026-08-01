@@ -4,11 +4,14 @@
 支持环境变量覆盖，API Key 优先从 GEMINI_API_KEY 环境变量读取。
 """
 
+import logging
 import os
 from pathlib import Path
 
 import yaml
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 
 class ER2Config(BaseModel):
@@ -107,5 +110,19 @@ def load_config(config_path: str = "config.yaml") -> AetherConfig:
     if path.exists():
         with open(path, "r", encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
-        return AetherConfig(**raw)
-    return AetherConfig()
+        cfg = AetherConfig(**raw)
+    else:
+        logger.warning("[Config] %s not found, using defaults", config_path)
+        cfg = AetherConfig()
+
+    # API Key 非空校验
+    if not cfg.er2.api_key:
+        raise ValueError(
+            "ER2 API Key is required. "
+            "Set GEMINI_API_KEY environment variable or configure in config.yaml"
+        )
+    if not cfg.tts.api_key:
+        logger.warning("[Config] TTS api_key is empty, falling back to ER2 key")
+        cfg.tts.api_key = cfg.er2.api_key
+
+    return cfg

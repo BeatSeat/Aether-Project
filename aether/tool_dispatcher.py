@@ -20,6 +20,17 @@ from google.genai import types
 
 logger = logging.getLogger(__name__)
 
+# ── 合法枚举值 ───────────────────────────────
+VALID_EMOTIONS = {
+    "neutral", "happy", "sad", "angry", "amused",
+    "curious", "worried", "enthusiastic", "sarcastic",
+    "thinking", "apologetic", "surprised",
+}
+VALID_SPEECH_RATES = {"slow", "normal", "fast"}
+MOTION_DURATION_MIN = 0.5
+MOTION_DURATION_MAX = 10.0
+TEXT_MAX_LENGTH = 200
+
 
 class MotionState(Enum):
     IDLE = "idle"
@@ -135,17 +146,30 @@ class ToolDispatcher:
     # ── 各处理器 ───────────────────────────────
 
     async def _handle_tts(self, args: dict) -> dict:
-        """处理 TTS 调用"""
+        """处理 TTS 调用（含参数校验）"""
         text = args.get("text", "")
         emotion = args.get("emotion", "neutral")
         speech_rate = args.get("speech_rate", "normal")
+
+        # ── 参数校验 ──
+        if not text or not text.strip():
+            logger.warning("[Dispatcher] TTS text is empty, skipping")
+            return {"status": "error", "error": "text is empty"}
+        if len(text) > TEXT_MAX_LENGTH:
+            logger.warning("[Dispatcher] TTS text too long (%d chars), truncating", len(text))
+            text = text[:TEXT_MAX_LENGTH]
+        if emotion not in VALID_EMOTIONS:
+            logger.warning("[Dispatcher] Invalid emotion '%s', falling back to neutral", emotion)
+            emotion = "neutral"
+        if speech_rate not in VALID_SPEECH_RATES:
+            logger.warning("[Dispatcher] Invalid speech_rate '%s', falling back to normal", speech_rate)
+            speech_rate = "normal"
 
         self.state.emotion_state = emotion
 
         if self._tts_handler:
             task = asyncio.create_task(self._tts_handler(text, emotion, speech_rate))
             self.state.current_tts_task = task
-            # 等待 TTS 完成以获取结果
             await task
             return {"status": "played", "text": text, "emotion": emotion}
         else:
@@ -153,9 +177,25 @@ class ToolDispatcher:
             return {"status": "no_handler"}
 
     async def _handle_motion(self, args: dict) -> dict:
-        """处理动作调用"""
+        """处理动作调用（含参数校验）"""
         action = args.get("action", "")
         duration = args.get("duration", 2.0)
+
+        # ── 参数校验 ──
+        if not action or not action.strip():
+            logger.warning("[Dispatcher] Motion action is empty, skipping")
+            return {"status": "error", "error": "action is empty"}
+        try:
+            duration = float(duration)
+        except (TypeError, ValueError):
+            logger.warning("[Dispatcher] Invalid duration '%s', falling back to 2.0", duration)
+            duration = 2.0
+        if duration < MOTION_DURATION_MIN:
+            logger.warning("[Dispatcher] Duration %.1f below min, clamping to %.1f", duration, MOTION_DURATION_MIN)
+            duration = MOTION_DURATION_MIN
+        if duration > MOTION_DURATION_MAX:
+            logger.warning("[Dispatcher] Duration %.1f above max, clamping to %.1f", duration, MOTION_DURATION_MAX)
+            duration = MOTION_DURATION_MAX
 
         self.state.motion_state = MotionState.GENERATING
 
