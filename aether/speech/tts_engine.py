@@ -17,6 +17,7 @@ from google import genai
 from google.genai import types
 
 from ..config import TTSConfig
+from ..protocols import TTSPort
 from .base import BaseTTSEngine
 
 logger = logging.getLogger(__name__)
@@ -70,7 +71,7 @@ SPLIT_MODES = {
 }
 
 
-class TTSEngine(BaseTTSEngine):
+class TTSEngine(BaseTTSEngine, TTSPort):
     """TTS 分段合成引擎（Gemini TTS API）"""
 
     def __init__(self, config: TTSConfig):

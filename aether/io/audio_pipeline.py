@@ -25,6 +25,7 @@ from typing import Optional, Callable, Awaitable
 import numpy as np
 
 from ..config import AudioConfig
+from ..protocols import AudioPort
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ except ImportError:
     logger.warning("[Audio] sounddevice not installed, audio I/O disabled")
 
 
-class AudioPipeline:
+class AudioPipeline(AudioPort):
     """音频输入/输出管道
 
     管理麦克风采集、VAD 检测、音频播放，并与 ER2/TTS 引擎对接。
